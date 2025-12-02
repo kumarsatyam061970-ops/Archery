@@ -165,7 +165,6 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
 
     // Initially, make body sleep (not affected by physics until shot)
     body.setAwake(false);
-    body.gravityScale = 1;
 
     return body;
   }
