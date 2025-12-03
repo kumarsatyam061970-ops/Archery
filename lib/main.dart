@@ -5,17 +5,20 @@ import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flame_forge2d/flame_forge2d.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:forge2d/forge2d.dart' as forge2d;
 
 void main() {
   runApp(GameWidget(game: ArcheryGame()));
 }
 
-class ArcheryGame extends Forge2DGame with PanDetector {
+class ArcheryGame extends Forge2DGame
+    with PanDetector, MouseMovementDetector, KeyboardEvents {
   late final ArrowComponent _arrow;
   bool _isAiming = false;
   Vector2 _arrowStartPosition = Vector2.zero();
   Vector2? _dragStartPosition;
+  static const double _projectileSpeed = 160.0;
 
   ArcheryGame()
     : super(
@@ -39,21 +42,9 @@ class ArcheryGame extends Forge2DGame with PanDetector {
     // Origin at center of screen for our custom axes
     final center = size / 2;
 
-    // Arrow starts near the origin (0,0) of our custom axes.
-    // We'll aim it so that its HEAD is exactly at the origin.
+    // Arrow for aiming sits at the origin (0, 0) of our custom axes.
     const launchAngleDeg = 30.0;
-    final launchAngleRad = -launchAngleDeg * math.pi / 180.0;
-    final launchDir = Vector2(
-      math.cos(launchAngleRad),
-      math.sin(launchAngleRad),
-    );
-
-    // Approximate arrow length (matches ArrowComponent's default).
-    const arrowLength = 44.0;
-
-    // Tail position so that the head lies at the origin (center).
-    final tailPosition = center - launchDir * arrowLength;
-    _arrowStartPosition = tailPosition;
+    _arrowStartPosition = center;
 
     _arrow = ArrowComponent(startPosition: _arrowStartPosition);
     await add(_arrow);
@@ -69,7 +60,7 @@ class ArcheryGame extends Forge2DGame with PanDetector {
     );
 
     // Immediately shoot the arrow so that its HEAD follows the red curve.
-    _arrow.shootAlongCurve(speed: 150.0, angleDegrees: launchAngleDeg);
+    // _arrow.shootAlongCurve(speed: 150.0, angleDegrees: launchAngleDeg);
   }
 
   @override
@@ -78,6 +69,7 @@ class ArcheryGame extends Forge2DGame with PanDetector {
     if (!_arrow.isFlying) {
       _isAiming = true;
       _dragStartPosition = info.eventPosition.widget;
+      _aimArrowAt(info.eventPosition.widget);
     }
   }
 
@@ -86,23 +78,24 @@ class ArcheryGame extends Forge2DGame with PanDetector {
     if (_isAiming && !_arrow.isFlying && _dragStartPosition != null) {
       final currentPosition = info.eventPosition.widget;
 
-      // Calculate aim direction (from arrow start position to where user is dragging)
-      final aimVector = currentPosition - _arrowStartPosition;
+      _aimArrowAt(currentPosition);
+
+      // Calculate pull strength based on distance from start position
+      final aimVector = currentPosition - _arrow.startPosition;
       final aimDistance = aimVector.length;
+
+      // Update aim direction even for small drags so the firing direction
+      // always matches the visual arrow orientation.
+      if (aimDistance > 0) {
+        _arrow.aimDirection = aimVector.normalized();
+      }
 
       // Only update if user has dragged away from arrow start (minimum distance)
       if (aimDistance > 20) {
-        // Normalize aim direction
-        final normalizedAim = aimVector.normalized();
-
         // Limit how far back you can pull
         final maxPullDistance = 200.0;
         final pullDistance = math.min(aimDistance, maxPullDistance);
 
-        // Rotate arrow but keep it anchored at start position
-        final aimAngle = math.atan2(normalizedAim.y, normalizedAim.x);
-        _arrow.setAimPosition(_arrow.startPosition, aimAngle);
-        _arrow.aimDirection = normalizedAim;
         _arrow.pullStrength = pullDistance / maxPullDistance;
       }
     }
@@ -111,7 +104,7 @@ class ArcheryGame extends Forge2DGame with PanDetector {
   @override
   void onPanEnd(DragEndInfo info) {
     if (_isAiming) {
-      _arrow.shoot();
+      // _arrow.shoot();
       _isAiming = false;
       _dragStartPosition = null;
     }
@@ -129,6 +122,54 @@ class ArcheryGame extends Forge2DGame with PanDetector {
 
   void resetArrow() {
     _arrow.resetToStart();
+  }
+
+  void _aimArrowAt(Vector2 target) {
+    if (_arrow.isFlying) return;
+
+    final origin = _arrow.startPosition;
+    final direction = target - origin;
+
+    if (direction.length2 < 1) return;
+
+    final angle = math.atan2(direction.y, direction.x);
+    _arrow.setAimPosition(origin, angle);
+    _arrow.aimDirection = direction.normalized();
+  }
+
+  @override
+  void onMouseMove(PointerHoverInfo info) {
+    _aimArrowAt(info.eventPosition.widget);
+  }
+
+  Future<void> _fireArrow() async {
+    if (!_arrow.isLoaded) return;
+
+    final dir = _arrow.aimDirection.normalized();
+    if (dir.length2 < 1e-4) return;
+
+    final spawnPosition = Vector2(
+      _arrow.body.position.x,
+      _arrow.body.position.y,
+    );
+
+    final velocity = dir * _projectileSpeed;
+
+    await add(
+      ArrowProjectile(startPosition: spawnPosition, initialVelocity: velocity),
+    );
+  }
+
+  @override
+  KeyEventResult onKeyEvent(
+    KeyEvent event,
+    Set<LogicalKeyboardKey> keysPressed,
+  ) {
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.space) {
+      _fireArrow();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 }
 
@@ -229,6 +270,9 @@ class ProjectilePathComponent extends Component with HasGameRef<ArcheryGame> {
   }
 }
 
+Sprite? _sharedArrowSprite;
+Vector2? _sharedArrowSpriteSize;
+
 class ArrowComponent extends BodyComponent<ArcheryGame> {
   final Vector2 startPosition;
   Vector2 aimDirection = Vector2(1, 0);
@@ -244,29 +288,23 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
   static const double baseSpeed =
       15.0; // Base speed in Forge2D units per second
 
-  // Parameters for making the arrow follow the analytic curve exactly
-  bool _followAnalytic = false;
-  double _analyticSpeed = 0.0;
-  double _analyticAngleDeg = 0.0;
-  double _analyticTime = 0.0;
-  forge2d.Vector2? _analyticStart;
-
   ArrowComponent({required this.startPosition});
 
   @override
   Future<void> onLoad() async {
     await super.onLoad();
 
-    // Load sprite
-    final sprite = await Sprite.load('arrow.png');
-    spriteSize = sprite.originalSize * 0.2;
+    // Load sprite (re-use cached instance if available)
+    _sharedArrowSprite ??= await Sprite.load('arrow.png');
+    _sharedArrowSpriteSize ??= _sharedArrowSprite!.originalSize * 0.2;
+    spriteSize = _sharedArrowSpriteSize!;
 
     // Create sprite component as child
     spriteComponent = SpriteComponent(
-      sprite: sprite,
+      sprite: _sharedArrowSprite!,
       size: spriteSize,
-      // Center-right so that the physics body's position is near the arrow head.
-      anchor: Anchor.centerRight,
+      // Center anchor so rotation happens around the middle of the arrow.
+      anchor: Anchor.center,
     );
     add(spriteComponent);
   }
@@ -298,7 +336,10 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
     final fixtureDef = forge2d.FixtureDef(shape)
       ..density = 1.0
       ..friction = 0.3
-      ..restitution = 0.1; // Slight bounce
+      ..restitution =
+          0.1 // Slight bounce
+      ..isSensor =
+          true; // Keep the aiming arrow from colliding with projectiles
 
     body.createFixture(fixtureDef);
 
@@ -307,6 +348,7 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
 
     // Initially, make body sleep (not affected by physics until shot)
     body.setAwake(false);
+    body.gravityScale = forge2d.Vector2.zero();
 
     return body;
   }
@@ -314,11 +356,14 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
   void setAimPosition(Vector2 position, double angle) {
     // Convert Flame Vector2 to Forge2D Vector2
     final forge2dPosition = forge2d.Vector2(position.x, position.y);
-    // When aiming, update body position and angle, keep it awake but with zero velocity
-    body.setAwake(true);
-    body.setTransform(forge2dPosition, angle);
-    body.linearVelocity = forge2d.Vector2.zero();
-    body.angularVelocity = 0.0;
+    // When aiming, update body position and angle without waking it up so
+    // gravity doesn't pull it down while lining up the shot.
+    body
+      ..gravityScale = forge2d.Vector2.zero()
+      ..setTransform(forge2dPosition, angle)
+      ..linearVelocity = forge2d.Vector2.zero()
+      ..angularVelocity = 0.0
+      ..setAwake(false);
   }
 
   void shoot() {
@@ -335,33 +380,11 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
       );
 
       // Apply initial velocity to the body; Box2D gravity will create the parabolic path
-      body.setAwake(true);
-      body.linearVelocity = velocity;
+      body
+        ..gravityScale = forge2d.Vector2(1.0, 1.0)
+        ..setAwake(true)
+        ..linearVelocity = velocity;
     }
-  }
-
-  /// Shoots the arrow along an analytic projectile curve with the given speed
-  /// and launch angle (in degrees), using the same coordinate convention as
-  /// [ProjectilePathComponent].
-  void shootAlongCurve({required double speed, required double angleDegrees}) {
-    if (isFlying) return;
-
-    isFlying = true;
-
-    // Configure analytic-follow parameters so update() can drive the body.
-    _followAnalytic = true;
-    _analyticSpeed = speed;
-    _analyticAngleDeg = angleDegrees;
-    _analyticTime = 0.0;
-
-    // _analyticStart stores the HEAD position for t = 0.
-    // This should be the origin of our custom axes (screen center),
-    // which is where the red curve starts.
-    _analyticStart = forge2d.Vector2(game.size.x / 2, game.size.y / 2);
-
-    // Turn off gravity for this body; we will apply the analytic motion manually
-    body.gravityScale = forge2d.Vector2.zero();
-    body.setAwake(true);
   }
 
   @override
@@ -369,44 +392,6 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
     super.update(dt);
 
     if (isFlying) {
-      // If configured, move the arrow along the same analytic curve used
-      // by [ProjectilePathComponent], so it visually follows the red path.
-      if (_followAnalytic && _analyticStart != null) {
-        _analyticTime += dt;
-
-        final g = game.world.gravity.y.toDouble();
-        final angleRad = -_analyticAngleDeg * math.pi / 180.0;
-
-        final vx0 = _analyticSpeed * math.cos(angleRad);
-        final vy0 = _analyticSpeed * math.sin(angleRad);
-
-        // Analytic position/velocity of the ARROW HEAD.
-        final headX = _analyticStart!.x + vx0 * _analyticTime;
-        final headY =
-            _analyticStart!.y +
-            vy0 * _analyticTime +
-            0.5 * g * _analyticTime * _analyticTime;
-
-        final vx = vx0;
-        final vy = vy0 + g * _analyticTime;
-
-        // With anchor = centerRight, the physics body's position represents
-        // (approximately) the arrow head, so we place the body directly on
-        // the analytic head position.
-        body.setTransform(forge2d.Vector2(headX, headY), math.atan2(vy, vx));
-        body.linearVelocity = forge2d.Vector2(vx, vy);
-
-        // Stop following after we come back to the original vertical level
-        // (i.e. full arc is complete), similar to the red curve logic.
-        if (_analyticTime > 0 && headY >= _analyticStart!.y) {
-          _followAnalytic = false;
-          body.gravityScale = forge2d.Vector2(
-            1.0,
-            1.0,
-          ); // restore gravity if we want physics again
-        }
-      }
-
       final currentVelocity = body.linearVelocity;
       if (currentVelocity.length2 > 0) {
         spriteComponent.angle = math.atan2(
@@ -439,10 +424,12 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
 
     // Reset body to start position and make it sleep (not affected by physics)
     final forge2dPosition = forge2d.Vector2(startPosition.x, startPosition.y);
-    body.setTransform(forge2dPosition, 0.0);
-    body.linearVelocity = forge2d.Vector2.zero();
-    body.angularVelocity = 0.0;
-    body.setAwake(false);
+    body
+      ..gravityScale = forge2d.Vector2.zero()
+      ..setTransform(forge2dPosition, 0.0)
+      ..linearVelocity = forge2d.Vector2.zero()
+      ..angularVelocity = 0.0
+      ..setAwake(false);
   }
 
   // Collision detection - this will be called by Forge2D when collision occurs
@@ -450,5 +437,83 @@ class ArrowComponent extends BodyComponent<ArcheryGame> {
     // Handle collision with other objects
     // For example, you could check if it's a target, obstacle, etc.
     print('Arrow collided with: $other');
+  }
+}
+
+class ArrowProjectile extends BodyComponent<ArcheryGame> {
+  final Vector2 startPosition;
+  final Vector2 initialVelocity;
+
+  late SpriteComponent spriteComponent;
+  Vector2 spriteSize = Vector2(44, 8.8);
+
+  ArrowProjectile({required this.startPosition, required this.initialVelocity});
+
+  @override
+  Future<void> onLoad() async {
+    await super.onLoad();
+
+    // Reuse cached sprite from the aim arrow to avoid reloading the asset.
+    _sharedArrowSprite ??= await Sprite.load('arrow.png');
+    _sharedArrowSpriteSize ??= _sharedArrowSprite!.originalSize * 0.2;
+    spriteSize = _sharedArrowSpriteSize!;
+
+    spriteComponent = SpriteComponent(
+      sprite: _sharedArrowSprite!,
+      size: spriteSize,
+      anchor: Anchor.center,
+    );
+    add(spriteComponent);
+  }
+
+  @override
+  forge2d.Body createBody() {
+    final bodyDef = forge2d.BodyDef(
+      type: forge2d.BodyType.dynamic,
+      position: forge2d.Vector2(startPosition.x, startPosition.y),
+      angle: math.atan2(initialVelocity.y, initialVelocity.x),
+      bullet: true,
+    );
+
+    final body = world.createBody(bodyDef);
+
+    final shape = forge2d.PolygonShape()
+      ..setAsBox(
+        spriteSize.x / 2,
+        spriteSize.y / 2,
+        forge2d.Vector2.zero(),
+        0.0,
+      );
+
+    final fixtureDef = forge2d.FixtureDef(shape)
+      ..density = 1.0
+      ..friction = 0.3
+      ..restitution = 0.1;
+
+    body.createFixture(fixtureDef);
+    body
+      ..gravityScale = forge2d.Vector2(1.0, 1.0)
+      ..linearVelocity = forge2d.Vector2(initialVelocity.x, initialVelocity.y);
+
+    return body;
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+
+    final velocity = body.linearVelocity;
+    if (velocity.length2 > 1e-4) {
+      spriteComponent.angle = math.atan2(velocity.y, velocity.x);
+    }
+
+    final pos = body.position;
+    final bounds = game.size;
+    if (pos.x < -100 ||
+        pos.x > bounds.x + 100 ||
+        pos.y < -100 ||
+        pos.y > bounds.y + 100) {
+      removeFromParent();
+    }
   }
 }
