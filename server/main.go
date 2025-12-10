@@ -159,10 +159,11 @@ func (gs *GameServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			var rawMsg map[string]interface{}
 			err := conn.ReadJSON(&rawMsg)
 			if err != nil {
-				log.Printf("Read error: %v", err)
+				log.Printf("❌ [SERVER] Read error from player %s: %v", playerId, err)
 				break
 			}
 
+			log.Printf("📥 [SERVER] Received message from player %s: type=%v", playerId, rawMsg["type"])
 			room.handleMessage(player, rawMsg)
 		}
 	}()
@@ -198,6 +199,7 @@ func (gr *GameRoom) handleMessage(player *Player, rawMsg map[string]interface{})
 
 	switch msgType {
 	case "arrow_shot":
+		log.Printf("🏹 [SERVER] Received arrow_shot from player %s", player.id)
 		// Parse arrow shot message directly from raw message
 		arrowMsg := ArrowShotMessage{
 			StartX:    getFloat64(rawMsg, "start_x"),
@@ -206,6 +208,8 @@ func (gr *GameRoom) handleMessage(player *Player, rawMsg map[string]interface{})
 			Speed:     getFloat64(rawMsg, "speed"),
 			Timestamp: getInt64(rawMsg, "timestamp"),
 		}
+		log.Printf("🏹 [SERVER] Parsed arrow: pos=(%.2f, %.2f), angle=%.2f, speed=%.2f", 
+			arrowMsg.StartX, arrowMsg.StartY, arrowMsg.Angle, arrowMsg.Speed)
 		gr.handleArrowShot(player, arrowMsg)
 
 	case "aim_update":
@@ -253,8 +257,7 @@ func getInt64(m map[string]interface{}, key string) int64 {
 }
 
 func (gr *GameRoom) handleArrowShot(player *Player, msg ArrowShotMessage) {
-	gr.mux.Lock()
-	defer gr.mux.Unlock()
+	log.Printf("🏹 [SERVER] handleArrowShot called for player %s", player.id)
 
 	// Create authoritative arrow
 	arrowId := generateArrowID()
@@ -268,9 +271,15 @@ func (gr *GameRoom) handleArrowShot(player *Player, msg ArrowShotMessage) {
 		active:    true,
 	}
 
+	// Hold lock only while modifying shared state
+	gr.mux.Lock()
 	gr.arrows[arrowId] = arrow
+	arrowCount := len(gr.arrows)
+	gr.mux.Unlock() // Release lock before broadcasting
 
-	// Broadcast arrow spawn to all players
+	log.Printf("🏹 [SERVER] Created arrow %s, total arrows: %d", arrowId, arrowCount)
+
+	// Broadcast arrow spawn to all players (this will acquire its own read lock)
 	spawnMsg := map[string]interface{}{
 		"type":       "arrow_spawned",
 		"arrow_id":   arrowId,
@@ -282,7 +291,15 @@ func (gr *GameRoom) handleArrowShot(player *Player, msg ArrowShotMessage) {
 		"owner_id":   player.id,
 	}
 
+	log.Printf("🏹 [SERVER] Broadcasting arrow_spawned to players")
+	// Log the message content for debugging
+	if jsonData, err := json.Marshal(spawnMsg); err == nil {
+		log.Printf("🏹 [SERVER] Broadcast message content: %s", string(jsonData))
+	}
+	log.Printf("🏹 [SERVER] About to call gr.broadcast(spawnMsg)...")
 	gr.broadcast(spawnMsg)
+	log.Printf("🏹 [SERVER] Returned from gr.broadcast(spawnMsg)")
+	log.Printf("🏹 [SERVER] Broadcast complete")
 }
 
 func (gr *GameRoom) runGameLoop() {
@@ -431,14 +448,28 @@ func (gr *GameRoom) broadcast(msg map[string]interface{}) {
 	gr.mux.RLock()
 	defer gr.mux.RUnlock()
 
+	msgType, _ := msg["type"].(string)
+	log.Printf("📢 [SERVER] Broadcasting %s message to %d players", msgType, len(gr.players))
+	
 	for _, player := range gr.players {
+		log.Printf("📢 [SERVER] About to send %s to player %s", msgType, player.id)
 		gr.sendToPlayer(player, msg)
+		log.Printf("📢 [SERVER] Finished sending %s to player %s", msgType, player.id)
 	}
+	
+	log.Printf("📢 [SERVER] Broadcast of %s complete", msgType)
 }
 
 func (gr *GameRoom) sendToPlayer(player *Player, msg map[string]interface{}) {
+	msgType, ok := msg["type"].(string)
+	if !ok {
+		msgType = "unknown"
+	}
+	log.Printf("📤 [SERVER] Sending message to player %s: type=%s", player.id, msgType)
 	if err := player.conn.WriteJSON(msg); err != nil {
-		log.Printf("Error sending message to player %s: %v", player.id, err)
+		log.Printf("❌ [SERVER] Error sending message to player %s: %v", player.id, err)
+	} else {
+		log.Printf("✅ [SERVER] Successfully sent %s message to player %s", msgType, player.id)
 	}
 }
 

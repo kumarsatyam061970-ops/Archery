@@ -32,13 +32,24 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
   Future<void> onLoad() async {
     await super.onLoad();
 
+    print('🎮 [GAME] Initializing game...');
+    
     // Initialize network client
+    print('🌐 [GAME] Creating GameClient...');
     gameClient = GameClient();
     _setupNetworkCallbacks();
 
     // Connect to server (change URL as needed)
-    await gameClient.connect('ws://localhost:8080/game');
-    gameClient.joinRoom('room1');
+    const serverUrl = 'ws://localhost:8080/game';
+    print('🌐 [GAME] Connecting to server: $serverUrl');
+    final connected = await gameClient.connect(serverUrl);
+    if (connected) {
+      print('✅ [GAME] Connected to server successfully');
+      print('🚪 [GAME] Joining room: room1');
+      gameClient.joinRoom('room1');
+    } else {
+      print('❌ [GAME] Failed to connect to server');
+    }
 
     // Add UI components
     add(AxesComponent(origin: origin));
@@ -60,7 +71,10 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
   }
 
   void _setupNetworkCallbacks() {
+    print('🔧 [GAME] Setting up network callbacks...');
+    
     gameClient.onArrowSpawned = (data) {
+      print('🏹 [GAME] Arrow spawned callback triggered');
       final arrowId = data['arrow_id'] as String;
       final startX = (data['start_x'] as num).toDouble();
       final startY = (data['start_y'] as num).toDouble();
@@ -68,17 +82,26 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
       final speed = (data['speed'] as num).toDouble();
       final spawnTime = data['spawn_time'] as int;
 
+      print('   Arrow ID: $arrowId');
+      print('   Start: ($startX, $startY)');
+      print('   Angle: $angle°');
+      print('   Speed: $speed');
+      print('   Spawn time: $spawnTime');
+
       // Check if this is our predicted arrow
       PredictedArrow? predicted;
       try {
         predicted = predictedArrows.values
             .firstWhere((a) => !a.confirmedByServer);
+        print('   Found unconfirmed predicted arrow: ${predicted.arrowId}');
       } catch (e) {
         predicted = null;
+        print('   No unconfirmed predicted arrow found');
       }
 
       if (predicted != null && !predicted.confirmedByServer) {
         // Reconcile our prediction
+        print('   ✅ Reconciling predicted arrow with server');
         predicted.confirmedByServer = true;
         predicted.reconcileWithServer(
           Vector2(startX, startY),
@@ -86,6 +109,7 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
         );
       } else {
         // Server spawned arrow from another player
+        print('   👤 Spawning server arrow from another player');
         _spawnServerArrow(
           arrowId: arrowId,
           startPos: Vector2(startX, startY),
@@ -97,23 +121,42 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
     };
 
     gameClient.onHitDetected = (data) {
+      print('🎯 [GAME] Hit detected callback triggered');
       final arrowId = data['arrow_id'] as String;
       final bodyPart = data['body_part'] as String?;
+      print('   Arrow ID: $arrowId');
+      print('   Body part: $bodyPart');
 
       // Remove arrow
       final arrow = predictedArrows[arrowId];
       if (arrow != null) {
+        print('   Removing arrow from game');
         arrow.removeFromParent();
         predictedArrows.remove(arrowId);
+      } else {
+        print('   ⚠️ Arrow not found in predicted arrows map');
       }
 
-      print('🎯 Hit detected: $bodyPart');
+      print('🎯 [GAME] Hit detected: $bodyPart');
     };
 
     gameClient.onGameStateUpdate = (data) {
+      final tick = data['tick'] as int? ?? 0;
+      final arrowsCount = (data['arrows'] as Map?)?.length ?? 0;
+      final playersCount = (data['players'] as Map?)?.length ?? 0;
+      
+      // Only log game_state every 60 ticks (once per second) to reduce noise
+      if (tick % 60 == 0) {
+        print('🎮 [GAME] Game state update (tick: $tick)');
+        print('   Server time: ${data['server_time']}');
+        print('   Arrows count: $arrowsCount');
+        print('   Players count: $playersCount');
+      }
+      
       gameState.updateFromServer(data);
 
       // Reconcile all predicted arrows with server state
+      int reconciledCount = 0;
       for (final arrow in predictedArrows.values) {
         if (gameState.arrows.containsKey(arrow.arrowId)) {
           final serverArrow = gameState.arrows[arrow.arrowId]!;
@@ -121,9 +164,15 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
             serverArrow.position,
             (serverArrow.spawnTime / 1000.0),
           );
+          reconciledCount++;
         }
       }
+      if (reconciledCount > 0) {
+        print('   ✅ Reconciled $reconciledCount arrow(s) with server state');
+      }
     };
+    
+    print('✅ [GAME] Network callbacks set up');
   }
 
   void _updateAim(Vector2 target) {
@@ -141,12 +190,20 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
   }
 
   void _spawnArrow() {
+    print('🏹 [GAME] Spawning arrow (client-side prediction)');
     final start = Vector2(origin.dx, origin.dy);
     final angleDeg = (math.atan2(aimDir.y, aimDir.x) * 180 / math.pi);
     final clientTimestamp = DateTime.now().millisecondsSinceEpoch;
 
+    print('   Start position: (${start.x.toStringAsFixed(2)}, ${start.y.toStringAsFixed(2)})');
+    print('   Angle: ${angleDeg.toStringAsFixed(2)}°');
+    print('   Speed: $speed');
+    print('   Gravity: $gravity');
+    print('   Client timestamp: $clientTimestamp');
+
     // 1. Client-side prediction (immediate feedback)
     final predictedId = 'pred_$clientTimestamp';
+    print('   Predicted arrow ID: $predictedId');
     final predicted = PredictedArrow(
       arrowId: predictedId,
       startPos: start,
@@ -157,8 +214,10 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
     );
     predictedArrows[predictedId] = predicted;
     add(predicted);
+    print('   ✅ Predicted arrow added to game');
 
     // 2. Send to server (authoritative)
+    print('   📤 Sending arrow shot to server...');
     gameClient.sendArrowShot(
       startPos: start,
       angleDeg: angleDeg,
