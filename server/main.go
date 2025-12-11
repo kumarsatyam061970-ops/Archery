@@ -36,6 +36,7 @@ type GameRoom struct {
 type Player struct {
 	id          string
 	conn        *websocket.Conn
+	writeMux    sync.Mutex // Protects concurrent writes to WebSocket
 	position    Vector2
 	aimDir      Vector2
 	lastUpdate  int64
@@ -57,6 +58,24 @@ type Vector2 struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
 }
+
+// Polygon represents a collision shape with vertices
+type Polygon struct {
+	Vertices []Vector2
+}
+
+// CharacterBodyParts holds polygons for each body part
+type CharacterBodyParts struct {
+	Head      Polygon
+	UpperBody Polygon
+	LowerBody Polygon
+}
+
+// Character dimensions (should match client)
+const (
+	CharacterWidth  = 100.0
+	CharacterHeight = 150.0
+)
 
 // Message represents a WebSocket message
 type Message struct {
@@ -340,13 +359,17 @@ func (gr *GameRoom) update() {
 		x := arrow.startPos.X + v0x*elapsed
 		y := arrow.startPos.Y + v0y*elapsed + 0.5*gravity*elapsed*elapsed
 
-		// Check collision with target (boy at x=425, y=350)
-		if gr.checkCollision(Vector2{X: x, Y: y}, Vector2{X: 425, Y: 350}) {
+		// Check collision using polygon detection
+		// Character position (should match client: origin.dx + 400, origin.dy)
+		characterPos := Vector2{X: 425, Y: 350}
+		arrowHeadPos := Vector2{X: x, Y: y} // Arrow head position
+		
+		hasCollision, bodyPart := gr.checkCollisionWithPolygons(arrowHeadPos, characterPos)
+		if hasCollision {
 			// Hit detected
-			bodyPart := gr.determineBodyPart(Vector2{X: x, Y: y}, Vector2{X: 425, Y: 350})
 			arrow.active = false
 
-			// Broadcast hit
+			// Broadcast hit with specific body part
 			hitMsg := map[string]interface{}{
 				"type":      "hit_detected",
 				"arrow_id":  id,
@@ -369,25 +392,97 @@ func (gr *GameRoom) update() {
 	}
 }
 
-func (gr *GameRoom) checkCollision(arrowPos, targetPos Vector2) bool {
-	// Simple distance-based collision check
-	// In a real game, you'd check against actual collider polygons
-	dx := arrowPos.X - targetPos.X
-	dy := arrowPos.Y - targetPos.Y
-	distance := math.Sqrt(dx*dx + dy*dy)
-	return distance < 50.0 // Collision radius
+// PointInPolygon checks if a point is inside a polygon using ray casting algorithm
+func pointInPolygon(point Vector2, polygon Polygon) bool {
+	if len(polygon.Vertices) < 3 {
+		return false // Need at least 3 vertices for a polygon
+	}
+
+	inside := false
+	j := len(polygon.Vertices) - 1
+
+	for i := 0; i < len(polygon.Vertices); i++ {
+		xi, yi := polygon.Vertices[i].X, polygon.Vertices[i].Y
+		xj, yj := polygon.Vertices[j].X, polygon.Vertices[j].Y
+
+		intersect := ((yi > point.Y) != (yj > point.Y)) &&
+			(point.X < (xj-xi)*(point.Y-yi)/(yj-yi)+xi)
+
+		if intersect {
+			inside = !inside
+		}
+		j = i
+	}
+
+	return inside
 }
 
-func (gr *GameRoom) determineBodyPart(arrowPos, targetPos Vector2) string {
-	// Determine which body part was hit based on Y position
-	dy := arrowPos.Y - targetPos.Y
-	if dy < -30 {
-		return "head"
-	} else if dy < 20 {
-		return "upperBody"
-	} else {
-		return "legs"
+// Initialize character body part polygons
+func initCharacterBodyParts(characterPos Vector2) CharacterBodyParts {
+	// Offset from character center
+	cx := characterPos.X
+	cy := characterPos.Y
+
+	// Head polygon (top portion)
+	headPolygon := Polygon{
+		Vertices: []Vector2{
+			{X: cx - CharacterWidth*0.3, Y: cy - CharacterHeight*0.5},      // Top-left
+			{X: cx + CharacterWidth*0.3, Y: cy - CharacterHeight*0.5},      // Top-right
+			{X: cx + CharacterWidth*0.4, Y: cy - CharacterHeight*0.3},      // Right-top
+			{X: cx + CharacterWidth*0.35, Y: cy - CharacterHeight*0.1},     // Right-middle
+			{X: cx - CharacterWidth*0.35, Y: cy - CharacterHeight*0.1},     // Left-middle
+			{X: cx - CharacterWidth*0.4, Y: cy - CharacterHeight*0.3},      // Left-top
+		},
 	}
+
+	// Upper body polygon (middle portion)
+	upperBodyPolygon := Polygon{
+		Vertices: []Vector2{
+			{X: cx - CharacterWidth*0.35, Y: cy - CharacterHeight*0.1},      // Top-left
+			{X: cx + CharacterWidth*0.35, Y: cy - CharacterHeight*0.1},      // Top-right
+			{X: cx + CharacterWidth*0.4, Y: cy + CharacterHeight*0.2},        // Right-bottom
+			{X: cx + CharacterWidth*0.3, Y: cy + CharacterHeight*0.25},      // Right-lower
+			{X: cx - CharacterWidth*0.3, Y: cy + CharacterHeight*0.25},      // Left-lower
+			{X: cx - CharacterWidth*0.4, Y: cy + CharacterHeight*0.2},       // Left-bottom
+		},
+	}
+
+	// Lower body polygon (bottom portion)
+	lowerBodyPolygon := Polygon{
+		Vertices: []Vector2{
+			{X: cx - CharacterWidth*0.3, Y: cy + CharacterHeight*0.25},       // Top-left
+			{X: cx + CharacterWidth*0.3, Y: cy + CharacterHeight*0.25},       // Top-right
+			{X: cx + CharacterWidth*0.35, Y: cy + CharacterHeight*0.5},      // Right-bottom
+			{X: cx + CharacterWidth*0.25, Y: cy + CharacterHeight*0.5},      // Right-lower
+			{X: cx - CharacterWidth*0.25, Y: cy + CharacterHeight*0.5},      // Left-lower
+			{X: cx - CharacterWidth*0.35, Y: cy + CharacterHeight*0.5},      // Left-bottom
+		},
+	}
+
+	return CharacterBodyParts{
+		Head:      headPolygon,
+		UpperBody: upperBodyPolygon,
+		LowerBody: lowerBodyPolygon,
+	}
+}
+
+// Check collision with character body parts using polygons
+func (gr *GameRoom) checkCollisionWithPolygons(arrowPos Vector2, characterPos Vector2) (bool, string) {
+	// Initialize character body parts
+	bodyParts := initCharacterBodyParts(characterPos)
+
+	// Check each body part polygon
+	if pointInPolygon(arrowPos, bodyParts.Head) {
+		return true, "head"
+	}
+	if pointInPolygon(arrowPos, bodyParts.UpperBody) {
+		return true, "upperBody"
+	}
+	if pointInPolygon(arrowPos, bodyParts.LowerBody) {
+		return true, "lowerBody"
+	}
+
+	return false, ""
 }
 
 func (gr *GameRoom) broadcastGameState() {
@@ -449,15 +544,19 @@ func (gr *GameRoom) broadcast(msg map[string]interface{}) {
 	defer gr.mux.RUnlock()
 
 	msgType, _ := msg["type"].(string)
-	log.Printf("📢 [SERVER] Broadcasting %s message to %d players", msgType, len(gr.players))
 	
-	for _, player := range gr.players {
-		log.Printf("📢 [SERVER] About to send %s to player %s", msgType, player.id)
-		gr.sendToPlayer(player, msg)
-		log.Printf("📢 [SERVER] Finished sending %s to player %s", msgType, player.id)
+	// Only log non-game_state messages to reduce spam (game_state is sent 60 times per second)
+	if msgType != "game_state" {
+		log.Printf("📢 [SERVER] Broadcasting %s message to %d players", msgType, len(gr.players))
 	}
 	
-	log.Printf("📢 [SERVER] Broadcast of %s complete", msgType)
+	for _, player := range gr.players {
+		gr.sendToPlayer(player, msg)
+	}
+	
+	if msgType != "game_state" {
+		log.Printf("📢 [SERVER] Broadcast of %s complete", msgType)
+	}
 }
 
 func (gr *GameRoom) sendToPlayer(player *Player, msg map[string]interface{}) {
@@ -465,10 +564,22 @@ func (gr *GameRoom) sendToPlayer(player *Player, msg map[string]interface{}) {
 	if !ok {
 		msgType = "unknown"
 	}
-	log.Printf("📤 [SERVER] Sending message to player %s: type=%s", player.id, msgType)
+	
+	// Protect WebSocket writes with mutex (WebSocket connections are not thread-safe)
+	player.writeMux.Lock()
+	defer player.writeMux.Unlock()
+	
+	// Only log non-game_state messages to reduce spam
+	if msgType != "game_state" {
+		log.Printf("📤 [SERVER] Sending message to player %s: type=%s", player.id, msgType)
+	}
+	
+	// Set write deadline to prevent hanging
+	player.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	
 	if err := player.conn.WriteJSON(msg); err != nil {
 		log.Printf("❌ [SERVER] Error sending message to player %s: %v", player.id, err)
-	} else {
+	} else if msgType != "game_state" {
 		log.Printf("✅ [SERVER] Successfully sent %s message to player %s", msgType, player.id)
 	}
 }

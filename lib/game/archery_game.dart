@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flame/components.dart';
+import 'package:flame/collisions.dart';
 import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
@@ -7,9 +8,10 @@ import 'package:flutter/services.dart';
 import '../network/game_client.dart';
 import '../network/game_state.dart';
 import 'predicted_arrow.dart';
+import 'character_config.dart';
 
 /// Main game class with client-side prediction and server synchronization
-class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
+class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisionDetection {
   // Game configuration
   Offset origin = const Offset(25, 350);
   double gravity = 60;
@@ -100,13 +102,18 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector {
       }
 
       if (predicted != null && !predicted.confirmedByServer) {
-        // Reconcile our prediction
+        // Reconcile our prediction - update the arrow ID to match server
         print('   ✅ Reconciling predicted arrow with server');
+        final oldId = predicted.arrowId;
+        predicted.arrowId = arrowId; // Update to server-assigned ID
         predicted.confirmedByServer = true;
-        predicted.reconcileWithServer(
-          Vector2(startX, startY),
-          (spawnTime / 1000.0),
-        );
+        
+        // Update the map key from predicted ID to server ID
+        predictedArrows.remove(oldId);
+        predictedArrows[arrowId] = predicted;
+        
+        // Don't set server position yet - wait for game_state update with actual position
+        print('   ✅ Arrow ID updated from $oldId to $arrowId');
       } else {
         // Server spawned arrow from another player
         print('   👤 Spawning server arrow from another player');
@@ -380,10 +387,16 @@ class AimInputComponent extends PositionComponent
   }
 }
 
-class BoyCharacterComponent extends SpriteComponent {
+class BoyCharacterComponent extends SpriteComponent 
+    with HasGameRef<ArcheryGame>, CollisionCallbacks {
   BoyCharacterComponent({required this.initialPosition});
 
   final Vector2 initialPosition;
+  
+  // Body part colliders (for client-side visual feedback)
+  late PolygonHitbox headCollider;
+  late PolygonHitbox upperBodyCollider;
+  late PolygonHitbox lowerBodyCollider;
 
   @override
   Future<void> onLoad() async {
@@ -394,6 +407,55 @@ class BoyCharacterComponent extends SpriteComponent {
     size = Vector2(targetWidth, targetWidth * aspectRatio);
     anchor = Anchor.center;
     position = initialPosition;
+
+    // Get polygon vertices from config (relative to component center)
+    final headVertices = CharacterBodyPartConfig.getHeadVertices();
+    final upperBodyVertices = CharacterBodyPartConfig.getUpperBodyVertices();
+    final lowerBodyVertices = CharacterBodyPartConfig.getLowerBodyVertices();
+
+    // Add head polygon collider
+    headCollider = PolygonHitbox(headVertices);
+    add(headCollider);
+
+    // Add upper body polygon collider
+    upperBodyCollider = PolygonHitbox(upperBodyVertices);
+    add(upperBodyCollider);
+
+    // Add lower body polygon collider
+    lowerBodyCollider = PolygonHitbox(lowerBodyVertices);
+    add(lowerBodyCollider);
+  }
+
+  @override
+  bool onCollisionStart(
+    Set<Vector2> intersectionPoints,
+    PositionComponent other,
+  ) {
+    super.onCollisionStart(intersectionPoints, other);
+    if (other is PredictedArrow) {
+      // Determine which body part was hit based on intersection points
+      final hitBodyPart = _getHitBodyPart(intersectionPoints);
+      print('🎯 [BOY] Arrow ${other.arrowId} collision detected on: $hitBodyPart');
+      // Server is authoritative - this is just for visual feedback
+    }
+    return true; // Allow collision to be processed
+  }
+
+  String _getHitBodyPart(Set<Vector2> intersectionPoints) {
+    if (intersectionPoints.isEmpty) return 'upperBody';
+    
+    // Get average Y position of collision points (relative to character center)
+    final avgY = intersectionPoints.map((p) => p.y - position.y).reduce((a, b) => a + b) / intersectionPoints.length;
+    final charHeight = size.y;
+    
+    // Determine body part based on Y position (matching server logic)
+    if (avgY < -charHeight * 0.2) {
+      return 'head';
+    } else if (avgY < charHeight * 0.2) {
+      return 'upperBody';
+    } else {
+      return 'lowerBody';
+    }
   }
 }
 
