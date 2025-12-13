@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flame/components.dart';
 import 'package:flame/collisions.dart';
+import 'package:flutter/material.dart';
+import 'arrow_prefab.dart';
 
 /// Client-side predicted arrow with reconciliation
 class PredictedArrow extends PositionComponent 
@@ -11,6 +13,7 @@ class PredictedArrow extends PositionComponent
   final double speed;
   final double gravity;
   final int spawnTimestamp;
+  final ArrowPrefabConfig? prefabConfig; // Prefab configuration
 
   late SpriteComponent spriteComponent;
   Vector2 spriteSize = Vector2(44, 8.8);
@@ -19,6 +22,11 @@ class PredictedArrow extends PositionComponent
   bool confirmedByServer = false;
   Vector2? serverPosition; // Last known server position for reconciliation
 
+  // Collider vertices (relative to arrow center, arrow points right)
+  late List<Vector2> headVertices;
+  late List<Vector2> bodyVertices;
+  late List<Vector2> tailVertices;
+
   PredictedArrow({
     required this.arrowId,
     required this.startPos,
@@ -26,15 +34,20 @@ class PredictedArrow extends PositionComponent
     required this.speed,
     required this.gravity,
     required this.spawnTimestamp,
+    this.prefabConfig, // Add prefab config parameter
   });
 
   @override
   Future<void> onLoad() async {
     await super.onLoad();
 
-    final sprite = await Sprite.load('arrow.png');
+    // Use prefab config if available, otherwise use defaults
+    final spritePath = prefabConfig?.spritePath ?? 'arrow.png';
+    final spriteScale = prefabConfig?.spriteScale ?? 0.2;
+
+    final sprite = await Sprite.load(spritePath);
     final originalSize = sprite.originalSize;
-    spriteSize = originalSize * 0.2;
+    spriteSize = originalSize * spriteScale;
 
     final angleRad = angleDeg * math.pi / 180;
     spriteComponent = SpriteComponent(
@@ -47,6 +60,9 @@ class PredictedArrow extends PositionComponent
 
     position = startPos;
 
+    // Initialize collider vertices
+    _initializeColliderVertices();
+
     // Add small collision point at arrow head (tip of arrow)
     // Arrow head is at the front (positive X in arrow's local space)
     final arrowHeadOffset = Vector2(spriteSize.x / 2, 0); // Tip of arrow
@@ -57,6 +73,38 @@ class PredictedArrow extends PositionComponent
       position: arrowHeadOffset,
       anchor: Anchor.center,
     ));
+  }
+
+  void _initializeColliderVertices() {
+    final arrowLength = spriteSize.x; // 8.8
+    final arrowWidth = spriteSize.y; // ~1.76
+    final headLength = arrowLength * 0.3; // ~2.64 (front 30%)
+    final tailLength = arrowLength * 0.3; // ~2.64 (back 30%)
+
+    // Head (arrow tip) - triangular shape at the front
+    headVertices = [
+      Vector2(arrowLength / 2, 0), // Tip (rightmost point)
+      Vector2(arrowLength / 2 - headLength, -arrowWidth / 2), // Top left
+      Vector2(arrowLength / 2 - headLength, arrowWidth / 2), // Bottom left
+    ];
+
+    // Body (middle section) - rectangular shape
+    bodyVertices = [
+      Vector2(arrowLength / 2 - headLength, -arrowWidth / 2), // Top left
+      Vector2(-arrowLength / 2 + tailLength, -arrowWidth / 2), // Top right
+      Vector2(-arrowLength / 2 + tailLength, arrowWidth / 2), // Bottom right
+      Vector2(arrowLength / 2 - headLength, arrowWidth / 2), // Bottom left
+    ];
+
+    // Tail (fletching) - wider at the back
+    tailVertices = [
+      Vector2(-arrowLength / 2 + tailLength, -arrowWidth / 2), // Top left
+      Vector2(-arrowLength / 2, -arrowWidth), // Top right (wider)
+      Vector2(-arrowLength / 2, arrowWidth), // Bottom right (wider)
+      Vector2(-arrowLength / 2 + tailLength, arrowWidth / 2), // Bottom left
+    ];
+
+    print('🏹 [ARROW] Collider vertices initialized. Head: ${headVertices.length}, Body: ${bodyVertices.length}, Tail: ${tailVertices.length}');
   }
 
   /// Get arrow head position in world space
@@ -142,6 +190,76 @@ class PredictedArrow extends PositionComponent
     serverPosition = serverPos;
     confirmedByServer = true;
     // Don't modify t here - it's calculated from elapsed time in update()
+  }
+
+  @override
+  void render(Canvas canvas) {
+    super.render(canvas);
+
+    // Only render colliders if enabled in prefab config
+    if (prefabConfig?.showColliders ?? true) {
+      // Save canvas state
+      canvas.save();
+
+      // Translate to arrow position and rotate
+      canvas.translate(position.x, position.y);
+      canvas.rotate(spriteComponent.angle);
+
+      // Use prefab config colors and stroke width if available
+      final headPaint = Paint()
+        ..color = prefabConfig?.headColor ?? Colors.red
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = prefabConfig?.colliderStrokeWidth ?? 4.0;
+
+      final bodyPaint = Paint()
+        ..color = prefabConfig?.bodyColor ?? Colors.blue
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = prefabConfig?.colliderStrokeWidth ?? 4.0;
+
+      final tailPaint = Paint()
+        ..color = prefabConfig?.tailColor ?? Colors.green
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = prefabConfig?.colliderStrokeWidth ?? 4.0;
+
+      // Draw head collider (red)
+      if (headVertices.isNotEmpty) {
+        _drawPolygon(canvas, headVertices, headPaint);
+      }
+
+      // Draw body collider (blue)
+      if (bodyVertices.isNotEmpty) {
+        _drawPolygon(canvas, bodyVertices, bodyPaint);
+      }
+
+      // Draw tail collider (green)
+      if (tailVertices.isNotEmpty) {
+        _drawPolygon(canvas, tailVertices, tailPaint);
+      }
+
+      // Restore canvas state
+      canvas.restore();
+    }
+  }
+
+  void _drawPolygon(Canvas canvas, List<Vector2> vertices, Paint paint) {
+    if (vertices.length < 2) return;
+
+    final path = Path();
+    path.moveTo(vertices.first.x, vertices.first.y);
+    for (var i = 1; i < vertices.length; i++) {
+      path.lineTo(vertices[i].x, vertices[i].y);
+    }
+    path.close();
+
+    canvas.drawPath(path, paint);
+
+    // Debug: Draw vertex points
+    final vertexPaint = Paint()
+      ..color = paint.color
+      ..style = PaintingStyle.fill;
+    for (final vertex in vertices) {
+      canvas.drawCircle(Offset(vertex.x, vertex.y), 2, vertexPaint);
+    }
   }
 }
 

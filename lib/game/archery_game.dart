@@ -1,17 +1,18 @@
 import 'dart:math' as math;
 import 'package:flame/components.dart';
-import 'package:flame/collisions.dart';
 import 'package:flame/events.dart';
-import 'package:flame/game.dart';
+import 'package:flame_forge2d/flame_forge2d.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../network/game_client.dart';
 import '../network/game_state.dart';
 import 'predicted_arrow.dart';
-import 'character_config.dart';
+import 'flame_colliders.dart';
+import 'arrow_prefab.dart';
+import 'static_arrow_editor.dart';
 
 /// Main game class with client-side prediction and server synchronization
-class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisionDetection {
+class ArcheryGame extends Forge2DGame with KeyboardEvents, PanDetector {
   // Game configuration
   Offset origin = const Offset(25, 350);
   double gravity = 60;
@@ -26,6 +27,11 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
   // UI Components
   late StaticArrowComponent staticArrow;
   late AimInputComponent aimInput;
+  BoyCharacterWithColliders? boyCharacter;
+  StaticArrowWithColliders? staticArrowEditor; // Static arrow for editing
+
+  // Arrow Prefab (configure once, instantiate many times)
+  late ArrowPrefab arrowPrefab;
 
   @override
   Color backgroundColor() => Colors.pink[50]!;
@@ -35,6 +41,24 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     await super.onLoad();
 
     print('🎮 [GAME] Initializing game...');
+    
+    // Create arrow prefab (configure once, like Unity prefab)
+    arrowPrefab = ArrowPrefab(
+      config: ArrowPrefabConfig(
+        showColliders: true,
+        headColor: Colors.red,
+        bodyColor: Colors.blue,
+        tailColor: Colors.green,
+        colliderStrokeWidth: 4.0,
+        defaultSpeed: speed,
+        defaultGravity: gravity,
+      ),
+    );
+    print('✅ [GAME] Arrow prefab created');
+    
+    // Note: Collision detection is server-authoritative
+    // Forge2D contact listener can be set up here if needed for client-side visual feedback
+    // world.contactListener = ArrowContactListener();
     
     // Initialize network client
     print('🌐 [GAME] Creating GameClient...');
@@ -67,9 +91,23 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     );
     await add(staticArrow);
 
-    // Add boy character (target)
+    // Add boy character (target) with editable colliders
     final boyPosition = Vector2(origin.dx + 400, origin.dy);
-    await add(BoyCharacterComponent(initialPosition: boyPosition));
+    boyCharacter = BoyCharacterWithColliders(
+      initialPosition: boyPosition,
+      vertexConfig: VertexConfig.defaultConfig(),
+    );
+    await add(boyCharacter!);
+
+    // Add static arrow for editing (doesn't move, just for vertex editing)
+    final arrowPosition = Vector2(origin.dx + 200, origin.dy);
+    staticArrowEditor = StaticArrowWithColliders(
+      initialPosition: arrowPosition,
+      initialAngleRad: 0.0, // Pointing right
+      vertexConfig: ArrowVertexConfig.defaultConfig(),
+    );
+    await add(staticArrowEditor!);
+    print('✅ [GAME] Static arrow editor added');
   }
 
   void _setupNetworkCallbacks() {
@@ -209,11 +247,12 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     print('   Client timestamp: $clientTimestamp');
 
     // 1. Client-side prediction (immediate feedback)
+    // Instantiate arrow from prefab (like Unity's Instantiate)
     final predictedId = 'pred_$clientTimestamp';
     print('   Predicted arrow ID: $predictedId');
-    final predicted = PredictedArrow(
+    final predicted = arrowPrefab.instantiate(
       arrowId: predictedId,
-      startPos: start,
+      position: start,
       angleDeg: angleDeg,
       speed: speed,
       gravity: gravity,
@@ -221,7 +260,7 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     );
     predictedArrows[predictedId] = predicted;
     add(predicted);
-    print('   ✅ Predicted arrow added to game');
+    print('   ✅ Arrow instantiated from prefab');
 
     // 2. Send to server (authoritative)
     print('   📤 Sending arrow shot to server...');
@@ -240,9 +279,10 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     required double speed,
     required int spawnTime,
   }) {
-    final arrow = PredictedArrow(
+    // Instantiate arrow from prefab for server-spawned arrows too
+    final arrow = arrowPrefab.instantiate(
       arrowId: arrowId,
-      startPos: startPos,
+      position: startPos,
       angleDeg: angleDeg,
       speed: speed,
       gravity: gravity,
@@ -262,8 +302,51 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
   }
 
   @override
-  void onPanUpdate(DragUpdateInfo info) {
+  void onPanStart(DragStartInfo info) {
+    // Forward to arrow editor if in edit mode
+    if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+      print('🎮 Game: Pan start in arrow edit mode, forwarding to arrow editor');
+      staticArrowEditor!.handlePanStart(info);
+      return;
+    }
+    // Forward to boy character if in edit mode
+    if (boyCharacter != null && boyCharacter!.isEditMode) {
+      print('🎮 Game: Pan start in edit mode, forwarding to boy character');
+      boyCharacter!.handlePanStart(info);
+      return;
+    }
+    // Otherwise handle aim input
     _updateAim(info.eventPosition.widget);
+  }
+
+  @override
+  void onPanUpdate(DragUpdateInfo info) {
+    // Forward to arrow editor if in edit mode
+    if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+      staticArrowEditor!.handlePanUpdate(info);
+      return;
+    }
+    // Forward to boy character if in edit mode
+    if (boyCharacter != null && boyCharacter!.isEditMode) {
+      boyCharacter!.handlePanUpdate(info);
+      return;
+    }
+    // Otherwise handle aim input
+    _updateAim(info.eventPosition.widget);
+  }
+
+  @override
+  void onPanEnd(DragEndInfo info) {
+    // Forward to arrow editor if in edit mode
+    if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+      staticArrowEditor!.handlePanEnd(info);
+      return;
+    }
+    // Forward to boy character if in edit mode
+    if (boyCharacter != null && boyCharacter!.isEditMode) {
+      boyCharacter!.handlePanEnd(info);
+      return;
+    }
   }
 
   @override
@@ -271,9 +354,80 @@ class ArcheryGame extends FlameGame with KeyboardEvents, PanDetector, HasCollisi
     KeyEvent event,
     Set<LogicalKeyboardKey> keysPressed,
   ) {
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.space) {
-      _spawnArrow();
-      return KeyEventResult.handled;
+    if (event is KeyDownEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.space) {
+        // Disable arrow spawning when in edit mode
+        if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+          print('⚠️ Cannot spawn arrow while editing arrow vertices');
+          return KeyEventResult.handled;
+        }
+        if (boyCharacter != null && boyCharacter!.isEditMode) {
+          print('⚠️ Cannot spawn arrow while editing character vertices');
+          return KeyEventResult.handled;
+        }
+        _spawnArrow();
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyE) {
+        // Toggle arrow edit mode (E key for arrow editing)
+        if (staticArrowEditor != null) {
+          final wasEditMode = staticArrowEditor!.isEditMode;
+          final newEditMode = !wasEditMode;
+          staticArrowEditor!.setEditMode(newEditMode);
+          
+          // Disable/enable aim input based on edit mode
+          if (newEditMode) {
+            // Entering edit mode - remove aim input to prevent interference
+            if (aimInput.isMounted) {
+              aimInput.removeFromParent();
+            }
+            // Also disable boy character edit mode if active
+            if (boyCharacter != null && boyCharacter!.isEditMode) {
+              boyCharacter!.setEditMode(false);
+            }
+          } else {
+            // Exiting edit mode - re-add aim input
+            if (!aimInput.isMounted) {
+              add(aimInput);
+            }
+          }
+          print('🎨 Arrow edit mode: ${newEditMode ? "ON" : "OFF"}');
+        }
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyC) {
+        // Toggle boy character edit mode (C key for character editing)
+        if (boyCharacter != null) {
+          final wasEditMode = boyCharacter!.isEditMode;
+          final newEditMode = !wasEditMode;
+          boyCharacter!.setEditMode(newEditMode);
+          
+          // Disable/enable aim input based on edit mode
+          if (newEditMode) {
+            // Entering edit mode - remove aim input to prevent interference
+            if (aimInput.isMounted) {
+              aimInput.removeFromParent();
+            }
+            // Also disable arrow edit mode if active
+            if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+              staticArrowEditor!.setEditMode(false);
+            }
+          } else {
+            // Exiting edit mode - re-add aim input
+            if (!aimInput.isMounted) {
+              add(aimInput);
+            }
+          }
+          print('🎨 Character edit mode: ${newEditMode ? "ON" : "OFF"}');
+        }
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyP) {
+        // Print vertex configuration
+        if (staticArrowEditor != null && staticArrowEditor!.isEditMode) {
+          staticArrowEditor!.printVertexConfig();
+        } else if (boyCharacter != null) {
+          boyCharacter!.printVertexConfig();
+        }
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
@@ -387,75 +541,54 @@ class AimInputComponent extends PositionComponent
   }
 }
 
-class BoyCharacterComponent extends SpriteComponent 
-    with HasGameRef<ArcheryGame>, CollisionCallbacks {
-  BoyCharacterComponent({required this.initialPosition});
 
-  final Vector2 initialPosition;
-  
-  // Body part colliders (for client-side visual feedback)
-  late PolygonHitbox headCollider;
-  late PolygonHitbox upperBodyCollider;
-  late PolygonHitbox lowerBodyCollider;
-
+/// ContactListener to detect collisions between arrows and the boy character
+class ArrowContactListener extends ContactListener {
   @override
-  Future<void> onLoad() async {
-    await super.onLoad();
-    sprite = await Sprite.load('boy.png');
-    const targetWidth = 100.0;
-    final aspectRatio = sprite!.originalSize.y / sprite!.originalSize.x;
-    size = Vector2(targetWidth, targetWidth * aspectRatio);
-    anchor = Anchor.center;
-    position = initialPosition;
+  void beginContact(Contact contact) {
+    final fixtureA = contact.fixtureA;
+    final fixtureB = contact.fixtureB;
 
-    // Get polygon vertices from config (relative to component center)
-    final headVertices = CharacterBodyPartConfig.getHeadVertices();
-    final upperBodyVertices = CharacterBodyPartConfig.getUpperBodyVertices();
-    final lowerBodyVertices = CharacterBodyPartConfig.getLowerBodyVertices();
+    final bodyA = fixtureA.body.userData;
+    final bodyB = fixtureB.body.userData;
 
-    // Add head polygon collider
-    headCollider = PolygonHitbox(headVertices);
-    add(headCollider);
+    // Check if one is the boy character
+    BoyCharacterWithColliders? boy;
+    String? bodyPart;
 
-    // Add upper body polygon collider
-    upperBodyCollider = PolygonHitbox(upperBodyVertices);
-    add(upperBodyCollider);
+    if (bodyA is BoyCharacterWithColliders) {
+      boy = bodyA;
+      // Check which body part was hit based on fixture userData
+      if (fixtureA.userData is String) {
+        bodyPart = fixtureA.userData as String;
+      }
+    } else if (bodyB is BoyCharacterWithColliders) {
+      boy = bodyB;
+      // Check which body part was hit based on fixture userData
+      if (fixtureB.userData is String) {
+        bodyPart = fixtureB.userData as String;
+      }
+    }
 
-    // Add lower body polygon collider
-    lowerBodyCollider = PolygonHitbox(lowerBodyVertices);
-    add(lowerBodyCollider);
+    if (boy != null && bodyPart != null) {
+      print('🎯 [FORGE2D] Collision detected on: $bodyPart');
+      boy.onBodyPartHit(bodyPart, contact);
+    }
   }
 
   @override
-  bool onCollisionStart(
-    Set<Vector2> intersectionPoints,
-    PositionComponent other,
-  ) {
-    super.onCollisionStart(intersectionPoints, other);
-    if (other is PredictedArrow) {
-      // Determine which body part was hit based on intersection points
-      final hitBodyPart = _getHitBodyPart(intersectionPoints);
-      print('🎯 [BOY] Arrow ${other.arrowId} collision detected on: $hitBodyPart');
-      // Server is authoritative - this is just for visual feedback
-    }
-    return true; // Allow collision to be processed
+  void endContact(Contact contact) {
+    // Called when contact ends (optional)
   }
 
-  String _getHitBodyPart(Set<Vector2> intersectionPoints) {
-    if (intersectionPoints.isEmpty) return 'upperBody';
-    
-    // Get average Y position of collision points (relative to character center)
-    final avgY = intersectionPoints.map((p) => p.y - position.y).reduce((a, b) => a + b) / intersectionPoints.length;
-    final charHeight = size.y;
-    
-    // Determine body part based on Y position (matching server logic)
-    if (avgY < -charHeight * 0.2) {
-      return 'head';
-    } else if (avgY < charHeight * 0.2) {
-      return 'upperBody';
-    } else {
-      return 'lowerBody';
-    }
+  @override
+  void preSolve(Contact contact, Manifold oldManifold) {
+    // Called before collision resolution (optional)
+  }
+
+  @override
+  void postSolve(Contact contact, ContactImpulse impulse) {
+    // Called after collision resolution (optional)
   }
 }
 
