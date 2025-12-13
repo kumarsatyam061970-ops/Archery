@@ -7,6 +7,7 @@ import 'package:flame_forge2d/flame_forge2d.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forge2d/forge2d.dart' as forge2d;
+import 'game/colliders.dart';
 
 double _degFromRadians(double radians) {
   final deg = radians * 180 / math.pi;
@@ -25,69 +26,6 @@ String _fmtPos(Vector2 position) =>
 
 void main() {
   runApp(const MaterialApp(home: GameScreen()));
-}
-
-/// ContactListener to detect collisions between arrows and the boy character
-class ArrowContactListener extends ContactListener {
-  @override
-  void beginContact(Contact contact) {
-    final fixtureA = contact.fixtureA;
-    final fixtureB = contact.fixtureB;
-    
-    final bodyA = fixtureA.body.userData;
-    final bodyB = fixtureB.body.userData;
-    
-    // Debug: print all contacts to see what's happening
-    print('🔍 Contact detected: bodyA=${bodyA.runtimeType}, bodyB=${bodyB.runtimeType}');
-    print('   fixtureA.userData=${fixtureA.userData}, fixtureB.userData=${fixtureB.userData}');
-    
-    // Check if one is an arrow and the other is the boy
-    ArrowProjectile? arrow;
-    BoyCharacter? boy;
-    String? bodyPart;
-    
-    if (bodyA is ArrowProjectile && bodyB is BoyCharacter) {
-      arrow = bodyA;
-      boy = bodyB;
-      // Check which body part was hit based on fixture userData
-      if (fixtureB.userData is String) {
-        bodyPart = fixtureB.userData as String;
-      }
-      print('✅ Arrow (A) hit Boy (B), body part: $bodyPart');
-    } else if (bodyB is ArrowProjectile && bodyA is BoyCharacter) {
-      arrow = bodyB;
-      boy = bodyA;
-      // Check which body part was hit based on fixture userData
-      if (fixtureA.userData is String) {
-        bodyPart = fixtureA.userData as String;
-      }
-      print('✅ Arrow (B) hit Boy (A), body part: $bodyPart');
-    }
-    
-    if (arrow != null && boy != null) {
-      print('🎯 Arrow hit boy! Body part: ${bodyPart ?? "unknown"}');
-      if (bodyPart != null) {
-        boy.onBodyPartHit(bodyPart, arrow);
-      }
-      // Remove the arrow after collision
-      arrow.removeFromParent();
-    }
-  }
-  
-  @override
-  void endContact(Contact contact) {
-    // Called when contact ends (optional)
-  }
-  
-  @override
-  void preSolve(Contact contact, Manifold oldManifold) {
-    // Called before collision resolution (optional)
-  }
-  
-  @override
-  void postSolve(Contact contact, ContactImpulse impulse) {
-    // Called after collision resolution (optional)
-  }
 }
 
 class GameScreen extends StatefulWidget {
@@ -151,7 +89,7 @@ class _GameScreenState extends State<GameScreen> {
   }
 }
 
-class ArcheryGame extends Forge2DGame with KeyboardEvents {
+class ArcheryGame extends Forge2DGame with KeyboardEvents, PanDetector {
   late final ArrowComponent _arrow;
   bool _isAiming = false;
   Vector2 _arrowStartPosition = Vector2.zero();
@@ -169,7 +107,12 @@ class ArcheryGame extends Forge2DGame with KeyboardEvents {
       );
 
   @override
-  Color backgroundColor() => Colors.pink;
+  Color backgroundColor() => const Color.fromARGB(255, 227, 138, 168);
+
+  // Vertex editor mode
+  bool _isEditMode = false;
+  BoyCharacter? _boyCharacter;
+  String _editingBodyPart = 'head'; // 'head', 'upperBody', 'legs'
 
   @override
   Future<void> onLoad() async {
@@ -188,8 +131,11 @@ class ArcheryGame extends Forge2DGame with KeyboardEvents {
 
     // Add boy character at (mid+100, mid)
     final boyPosition = Vector2(center.x + 300, center.y);
-    await add(BoyCharacter(position: boyPosition));
-
+    _boyCharacter = BoyCharacter(
+      position: boyPosition,
+      vertexConfig: VertexConfig.defaultConfig(),
+    );
+    await add(_boyCharacter!);
   }
 
   @override
@@ -247,7 +193,6 @@ class ArcheryGame extends Forge2DGame with KeyboardEvents {
     await add(
       ArrowProjectile(startPosition: spawnPosition, initialVelocity: velocity),
     );
-   
 
     await add(
       ArrowPathComponent(
@@ -263,11 +208,77 @@ class ArcheryGame extends Forge2DGame with KeyboardEvents {
     KeyEvent event,
     Set<LogicalKeyboardKey> keysPressed,
   ) {
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.space) {
-      _fireArrow();
-      return KeyEventResult.handled;
+    if (event is KeyDownEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.space) {
+        _fireArrow();
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyE) {
+        // Toggle edit mode
+        _toggleEditMode();
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyH) {
+        // Switch to editing head
+        _setEditingBodyPart('head');
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyU) {
+        // Switch to editing upperBody
+        _setEditingBodyPart('upperBody');
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyL) {
+        // Switch to editing legs
+        _setEditingBodyPart('legs');
+        return KeyEventResult.handled;
+      } else if (event.logicalKey == LogicalKeyboardKey.keyP) {
+        // Print current vertex configuration
+        _printVertexConfig();
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
+  }
+
+  void _toggleEditMode() {
+    _isEditMode = !_isEditMode;
+    if (_boyCharacter != null) {
+      _boyCharacter!.setEditMode(_isEditMode, _editingBodyPart);
+    }
+    print('Edit mode: ${_isEditMode ? "ON" : "OFF"}');
+    print('Editing body part: $_editingBodyPart');
+  }
+
+  void _setEditingBodyPart(String bodyPart) {
+    _editingBodyPart = bodyPart;
+    if (_boyCharacter != null && _isEditMode) {
+      _boyCharacter!.setEditMode(true, bodyPart);
+    }
+    print('Now editing: $bodyPart');
+  }
+
+  void _printVertexConfig() {
+    if (_boyCharacter != null) {
+      _boyCharacter!.printVertexConfig();
+    }
+  }
+
+  @override
+  void onPanStart(DragStartInfo info) {
+    if (_isEditMode && _boyCharacter != null) {
+      _boyCharacter!.handlePanStart(info);
+    }
+  }
+
+  @override
+  void onPanUpdate(DragUpdateInfo info) {
+    if (_isEditMode && _boyCharacter != null) {
+      _boyCharacter!.handlePanUpdate(info);
+    }
+  }
+
+  @override
+  void onPanEnd(DragEndInfo info) {
+    if (_isEditMode && _boyCharacter != null) {
+      _boyCharacter!.handlePanEnd(info);
+    }
   }
 }
 
@@ -334,12 +345,7 @@ class ArrowComponent extends BodyComponent<ArcheryGame>
 
     // Create a small rectangular fixture for the arrow
     final shape = forge2d.PolygonShape()
-      ..setAsBox(
-        60,
-        10 ,
-        forge2d.Vector2.zero(),
-        0.0,
-      );
+      ..setAsBox(60, 10, forge2d.Vector2.zero(), 0.0);
 
     final fixtureDef = forge2d.FixtureDef(shape)
       ..density = 1.0
@@ -370,7 +376,6 @@ class ArrowComponent extends BodyComponent<ArcheryGame>
       ..linearVelocity = forge2d.Vector2.zero()
       ..angularVelocity = 0.0
       ..setAwake(false);
-   
   }
 
   void shoot() {
@@ -388,7 +393,6 @@ class ArrowComponent extends BodyComponent<ArcheryGame>
 
       final arrowAngleDeg = _degFromRadians(spriteComponent.angle);
       final aimDirDeg = _degFromVector(aimDirection);
-   
 
       // Apply an impulse that yields the desired velocity
       body
@@ -401,9 +405,8 @@ class ArrowComponent extends BodyComponent<ArcheryGame>
         desiredVelocity.y * mass,
       );
       final impulseAngleDeg = _degFromVector(impulse);
-     
+
       body.applyLinearImpulse(impulse, point: body.worldCenter);
-    
 
       // Spawn a temporary visual trajectory path for the fired arrow
       gameRef.add(
@@ -423,10 +426,7 @@ class ArrowComponent extends BodyComponent<ArcheryGame>
     if (isFlying) {
       final currentVelocity = body.linearVelocity;
       if (currentVelocity.length2 > 0) {
-        final angle = math.atan2(
-          currentVelocity.y,
-          currentVelocity.x,
-        );
+        final angle = math.atan2(currentVelocity.y, currentVelocity.x);
         spriteComponent.angle = angle;
         // Update body angle so physics shape rotates too
         body.setTransform(body.position, angle);
@@ -478,16 +478,14 @@ class ArrowAxesOverlay extends Component with HasGameRef<ArcheryGame> {
   final Paint xPaint;
   final Paint yPaint;
 
-  ArrowAxesOverlay({
-    required this.arrow,
-    this.axisLength = 80,
-  })  : xPaint = Paint()
-          ..color = Colors.blue
-          ..strokeWidth = 2,
-        yPaint = Paint()
-          ..color = Colors.green
-          ..strokeWidth = 2,
-        super(priority: 1000);
+  ArrowAxesOverlay({required this.arrow, this.axisLength = 80})
+    : xPaint = Paint()
+        ..color = Colors.blue
+        ..strokeWidth = 2,
+      yPaint = Paint()
+        ..color = Colors.green
+        ..strokeWidth = 2,
+      super(priority: 1000);
 
   @override
   void render(Canvas canvas) {
@@ -570,12 +568,7 @@ class ArrowProjectile extends BodyComponent<ArcheryGame> {
     final body = world.createBody(bodyDef);
 
     final shape = forge2d.PolygonShape()
-      ..setAsBox(
-        60,
-        10,
-        forge2d.Vector2.zero(),
-        0.0,
-      );
+      ..setAsBox(60, 10, forge2d.Vector2.zero(), 0.0);
 
     final fixtureDef = forge2d.FixtureDef(shape)
       ..density = 1.0
@@ -584,10 +577,10 @@ class ArrowProjectile extends BodyComponent<ArcheryGame> {
       ..isSensor = true; // Collision detection only, no physical response
 
     body.createFixture(fixtureDef);
-    
+
     // Set userData so ContactListener can identify this as an arrow
     body.userData = this;
-    
+
     body
       ..gravityScale = forge2d.Vector2.zero()
       ..setAwake(true)
@@ -598,7 +591,7 @@ class ArrowProjectile extends BodyComponent<ArcheryGame> {
       initialVelocity.x * mass,
       initialVelocity.y * mass,
     );
-   
+
     body.applyLinearImpulse(impulse, point: body.worldCenter);
 
     return body;
@@ -687,227 +680,3 @@ class ArrowPathComponent extends Component with HasGameRef<ArcheryGame> {
     }
   }
 }
-
-class BoyCharacter extends BodyComponent<ArcheryGame> {
-  final Vector2 position;
-  late SpriteComponent spriteComponent;
-  Vector2 spriteSize = Vector2.zero();
-  
-  // Store vertices for rendering
-  List<forge2d.Vector2> headVertices = [];
-  List<forge2d.Vector2> upperBodyVertices = [];
-  List<forge2d.Vector2> legsVertices = [];
-  
-  BoyCharacter({required this.position});
-  
-  // Make colliders visible for debugging (set renderBody = true to see them)
-  @override
-  Paint get paint => Paint()
-    ..color = Colors.blue.withOpacity(0.3)
-    ..style = PaintingStyle.stroke
-    ..strokeWidth = 2.0;
-  
-  @override
-  bool get renderBody => false; // We'll render custom green lines instead
-  
-  @override
-  Future<void> onLoad() async {
-    // Load sprite FIRST before calling super.onLoad() so spriteSize is available for createBody()
-    final sprite = await Sprite.load('boy.png');
-    final originalSize = sprite.originalSize;
-    
-    // Set x size to 100 and calculate y based on aspect ratio
-    const targetWidth = 100.0;
-    final aspectRatio = originalSize.y / originalSize.x;
-    spriteSize = Vector2(targetWidth, targetWidth * aspectRatio);
-    
-    // Now call super.onLoad() which will call createBody()
-    await super.onLoad();
-    
-    spriteComponent = SpriteComponent(
-      sprite: sprite,
-      size: spriteSize, // x=100, y calculated from aspect ratio
-      anchor: Anchor.center,
-    );
-    add(spriteComponent);
-  }
-  
-  @override
-  forge2d.Body createBody() {
-    // Ensure spriteSize is valid (should be set in onLoad before super.onLoad())
-    // Use fallback size if spriteSize is not yet set
-    final effectiveWidth = spriteSize.x > 0 ? spriteSize.x : 100.0;
-    final effectiveHeight = spriteSize.y > 0 ? spriteSize.y : 150.0;
-    
-    final bodyDef = forge2d.BodyDef(
-      type: forge2d.BodyType.dynamic,
-      position: forge2d.Vector2(position.x, position.y),
-      angle: 0.0,
-      fixedRotation: true,
-    );
-    
-    final body = world.createBody(bodyDef);
-    
-    // Calculate proportional offsets based on sprite size
-    final spriteWidth = effectiveWidth;
-    final spriteHeight = effectiveHeight;
-    
-    // Head polygon - top portion of sprite (approximately top 30% of height)
-    final headTop = -spriteHeight * 0.35; // Top of head
-    final headBottom = -spriteHeight * 0.05; // Bottom of head
-    final headWidth = spriteWidth * 0.35; // Width of head
-    
-    headVertices = [
-      forge2d.Vector2(-headWidth * 0.9, headTop),           // Top left
-      forge2d.Vector2(headWidth * 0.9, headTop),            // Top right
-      forge2d.Vector2(headWidth, headTop + spriteHeight * 0.08), // Right upper
-      forge2d.Vector2(headWidth * 0.95, headTop + spriteHeight * 0.15), // Right middle
-      forge2d.Vector2(headWidth * 0.85, headBottom),        // Right lower
-      forge2d.Vector2(-headWidth * 0.85, headBottom),       // Left lower
-      forge2d.Vector2(-headWidth * 0.95, headTop + spriteHeight * 0.15), // Left middle
-      forge2d.Vector2(-headWidth, headTop + spriteHeight * 0.08), // Left upper
-    ];
-    
-    final headShape = forge2d.PolygonShape()
-      ..set(headVertices);
-    
-    final headFixture = forge2d.FixtureDef(headShape)
-      ..density = 1.0
-      ..friction = 0.3
-      ..restitution = 0.1
-      ..isSensor = false;
-    
-    final headFixtureObj = body.createFixture(headFixture);
-    headFixtureObj.userData = 'head';
-    
-    // Upper body polygon - middle portion (approximately 30-60% of height)
-    final upperBodyTop = -spriteHeight * 0.05;
-    final upperBodyBottom = spriteHeight * 0.25;
-    final upperBodyWidth = spriteWidth * 0.4;
-    
-    upperBodyVertices = [
-      forge2d.Vector2(-upperBodyWidth, upperBodyTop),     // Top left (shoulder)
-      forge2d.Vector2(upperBodyWidth, upperBodyTop),       // Top right (shoulder)
-      forge2d.Vector2(upperBodyWidth * 1.05, upperBodyBottom), // Bottom right (waist)
-      forge2d.Vector2(-upperBodyWidth * 1.05, upperBodyBottom), // Bottom left (waist)
-    ];
-    
-    final upperBodyShape = forge2d.PolygonShape()
-      ..set(upperBodyVertices);
-    
-    final upperBodyFixture = forge2d.FixtureDef(upperBodyShape)
-      ..density = 1.0
-      ..friction = 0.3
-      ..restitution = 0.1
-      ..isSensor = false;
-    
-    final upperBodyFixtureObj = body.createFixture(upperBodyFixture);
-    upperBodyFixtureObj.userData = 'upperBody';
-    
-    // Legs polygon - bottom portion (approximately bottom 40% of height)
-    final legsTop = spriteHeight * 0.09;
-    final legsBottom = spriteHeight * 0.40;
-    final legsWidth = spriteWidth * 0.15;
-    final footWidth = spriteWidth * 0.2;
-    
-    legsVertices = [
-      forge2d.Vector2(-legsWidth, legsTop),                 // Top left
-      forge2d.Vector2(legsWidth, legsTop),                  // Top right
-      forge2d.Vector2(legsWidth * 1.1, legsBottom),          // Bottom right
-      forge2d.Vector2(footWidth, legsBottom + spriteHeight * 0.05), // Right foot outer
-      forge2d.Vector2(footWidth * 0.5, legsBottom + spriteHeight * 0.05), // Right foot inner
-      forge2d.Vector2(-footWidth * 0.5, legsBottom + spriteHeight * 0.05), // Left foot inner
-      forge2d.Vector2(-footWidth, legsBottom + spriteHeight * 0.05), // Left foot outer
-      forge2d.Vector2(-legsWidth * 1.1, legsBottom),       // Bottom left
-    ];
-    
-    final legsShape = forge2d.PolygonShape()
-      ..set(legsVertices);
-    
-    final legsFixture = forge2d.FixtureDef(legsShape)
-      ..density = 1.0
-      ..friction = 0.5
-      ..restitution = 0.1
-      ..isSensor = false;
-    
-    final legsFixtureObj = body.createFixture(legsFixture);
-    legsFixtureObj.userData = 'legs';
-    
-    body.userData = this;
-    
-    // Set gravity to zero so the boy stays in place
-    body.gravityScale = forge2d.Vector2.zero();
-    // Keep body awake and active so it can detect collisions
-    // Even though it's dynamic, with zero gravity and no forces, it will stay in place
-    body
-      ..setAwake(true)
-      ..setActive(true); // Ensure body is active for collision detection
-    
-    return body;
-  }
-  
-  @override
-  void render(Canvas canvas) {
-    super.render(canvas);
-    
-    // Draw green lines for each collider
-    final greenPaint = Paint()
-      ..color = Colors.green
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0;
-    
-    // Draw head collider in green
-    if (headVertices.isNotEmpty) {
-      _drawPolygon(canvas, headVertices, greenPaint);
-    }
-    
-    // Draw upper body collider in green
-    if (upperBodyVertices.isNotEmpty) {
-      _drawPolygon(canvas, upperBodyVertices, greenPaint);
-    }
-    
-    // Draw legs collider in green
-    if (legsVertices.isNotEmpty) {
-      _drawPolygon(canvas, legsVertices, greenPaint);
-    }
-  }
-  
-  void _drawPolygon(Canvas canvas, List<forge2d.Vector2> vertices, Paint paint) {
-    if (vertices.isEmpty) return;
-    
-    final path = Path();
-    
-    // Convert Forge2D vertices to Flutter Offsets
-    // Note: Canvas is already transformed by BodyComponent's renderTree,
-    // so vertices are in local space (relative to body center)
-    final offsets = vertices
-        .map((v) => Offset(v.x.toDouble(), v.y.toDouble()))
-        .toList();
-    
-    // Draw the polygon
-    path.moveTo(offsets.first.dx, offsets.first.dy);
-    for (var i = 1; i < offsets.length; i++) {
-      path.lineTo(offsets[i].dx, offsets[i].dy);
-    }
-    path.close(); // Close the polygon
-    
-    canvas.drawPath(path, paint);
-  }
-  
-  void onBodyPartHit(String bodyPart, Object other) {
-    print('Body part hit: $bodyPart');
-    // Handle different body part hits
-    switch (bodyPart) {
-      case 'head':
-        print('Critical hit on head!');
-        break;
-      case 'upperBody':
-        print('Hit on upper body!');
-        break;
-      case 'legs':
-        print('Hit on legs!');
-        break;
-    }
-  }
-}
-
